@@ -35,7 +35,11 @@ int lightReadIndex = 0;                 // Current index in the readings array
 long lightReadingsTotal = 0;           // Running sum of readings
 int averagedLightValue = 0;             // The calculated average light value
 
-const bool USE_LIGHT_SENSOR = false; // Set to false to disable light sensor functionality
+const bool USE_LIGHT_SENSOR = true; // Set to false to disable light sensor functionality
+
+// Variables for timed light-based state transitions (single timer)
+unsigned long lightConditionStartTime = 0; // Time when light condition became stable for transition
+const unsigned long LIGHT_STABLE_TIME_MS = 10000; // Light condition must be stable for 10 seconds
 
 // Variables for non-blocking Serial printing
 unsigned long lastSerialPrintTime = 0;
@@ -158,12 +162,26 @@ void loop() {
                 Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Manual Override)");
             }
             // Automatic open based on light sensor
-            else if (USE_LIGHT_SENSOR && averagedLightValue > LIGHT_THRESHOLD_OPEN && isDoorFullyClosed) {
-                currentDoorState = OPENING_DOOR;
-                digitalWrite(MOTOR_PIN_1, HIGH); // Motor direction for opening
-                digitalWrite(MOTOR_PIN_2, LOW);
-                motorStartTime = millis();
-                Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Light > Threshold)");
+            else if (USE_LIGHT_SENSOR && isDoorFullyClosed) {
+                if (averagedLightValue > LIGHT_THRESHOLD_OPEN) {
+                    if (lightConditionStartTime == 0) {
+                        lightConditionStartTime = millis(); // Start timer if condition just met
+                        Serial.println("Light condition met for opening. Starting 10s timer...");
+                    } else if (millis() - lightConditionStartTime >= LIGHT_STABLE_TIME_MS) {
+                        currentDoorState = OPENING_DOOR;
+                        digitalWrite(MOTOR_PIN_1, HIGH); // Motor direction for opening
+                        digitalWrite(MOTOR_PIN_2, LOW);
+                        motorStartTime = millis();
+                        Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Light > Threshold for 10s)");
+                        lightConditionStartTime = 0; // Reset timer after transition
+                    }
+                } else {
+                    lightConditionStartTime = 0; // Reset timer if light drops below threshold
+                }
+            }
+            // Reset light timer if light sensor is not enabled or door is not fully closed
+            else {
+                lightConditionStartTime = 0;
             }
             break;
 
@@ -177,13 +195,27 @@ void loop() {
                 motorStartTime = millis();
                 Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Manual Override)");
             }
-            // Automatic close based on light sensor
-            else if (USE_LIGHT_SENSOR && averagedLightValue < LIGHT_THRESHOLD_CLOSE && isDoorFullyOpened) {
-                currentDoorState = CLOSING_DOOR;
-                digitalWrite(MOTOR_PIN_1, LOW);  // Motor direction for closing
-                digitalWrite(MOTOR_PIN_2, HIGH);
-                motorStartTime = millis();
-                Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Light < Threshold)");
+            // Automatic close based on light sensor (with 10-second delay)
+            else if (USE_LIGHT_SENSOR) {  // && isDoorFullyOpened) {
+                if (averagedLightValue < LIGHT_THRESHOLD_CLOSE) {
+                    if (lightConditionStartTime == 0) {
+                        lightConditionStartTime = millis(); // Start timer if condition just met
+                        Serial.println("Light condition met for closing. Starting 10s timer...");
+                    } else if (millis() - lightConditionStartTime >= LIGHT_STABLE_TIME_MS) {
+                        currentDoorState = CLOSING_DOOR;
+                        digitalWrite(MOTOR_PIN_1, LOW);  // Motor direction for closing
+                        digitalWrite(MOTOR_PIN_2, HIGH);
+                        motorStartTime = millis();
+                        Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Light < Threshold for 10s)");
+                        lightConditionStartTime = 0; // Reset timer after transition
+                    }
+                } else {
+                    lightConditionStartTime = 0; // Reset timer if light rises above threshold
+                }
+            }
+            // Reset light timer if light sensor is not enabled or door is not fully open
+            else {
+                lightConditionStartTime = 0;
             }
             break;
 
