@@ -104,6 +104,18 @@ void readLightSensor() {
     averagedLightValue = lightReadingsTotal / LIGHT_READING_COUNT;
 }
 
+bool readStableSwitch(int pin, unsigned long debounceTime = 300) {
+  if (digitalRead(pin) == HIGH) {
+    unsigned long start = millis();
+    while (millis() - start < debounceTime) {
+      if (digitalRead(pin) == LOW) return false; // bounced back
+    }
+    return true; // stable high
+  }
+  return false;
+}
+
+
 void loop() {
     // Always read and average the light sensor value
     readLightSensor();
@@ -111,7 +123,7 @@ void loop() {
     // Read end switch states
     int switchOpeningState = digitalRead(SWITCH_PIN_OPENING); // LOW when is opening
     int switchOpenState = digitalRead(SWITCH_PIN_OPEN_STOP);     // LOW when open
-    bool isDoorFullyClosed = (switchOpeningState == HIGH);
+    bool isDoorFullyClosed = readStableSwitch(SWITCH_PIN_OPENING);
     bool isDoorFullyOpened = (switchOpenState == LOW);
 
     //Serial.print("Switch states: ");
@@ -162,7 +174,7 @@ void loop() {
                 Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Manual Override)");
             }
             // Automatic open based on light sensor
-            else if (USE_LIGHT_SENSOR && isDoorFullyClosed) {
+            else if (USE_LIGHT_SENSOR) {
                 if (averagedLightValue > LIGHT_THRESHOLD_OPEN) {
                     if (lightConditionStartTime == 0) {
                         lightConditionStartTime = millis(); // Start timer if condition just met
