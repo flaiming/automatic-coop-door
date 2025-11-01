@@ -1,13 +1,15 @@
-// Define Pin Assignments
-const int MOTOR_PIN_1 = 2;   // Motor control pin 1
-const int MOTOR_PIN_2 = 3;   // Motor control pin 2
-const int SWITCH_PIN_OPENING = 4; // Switch detecting when doors are opening (LOW when is opening)
-const int SWITCH_PIN_OPEN_STOP = 5;   // End stop switch for door open position (LOW when opened)
-const int SENSOR_PIN = A7;   // Analog pin for light sensor
+#include "home_assistant_mqtt.h"
 
-// New: Manual Override Button Pins
-const int BUTTON_PIN_OPEN = 6;  // Button to manually open the door (LOW when pressed)
-const int BUTTON_PIN_CLOSE = 7; // Button to manually close the door (LOW when pressed)
+// ===== Platform-specific pin mapping =====
+// Wemos D1 mini GPIO map:
+// D5=GPIO14, D6=GPIO12, D7=GPIO13, D1=GPIO5, D2=GPIO4, D0=GPIO16, A0=ADC
+const int MOTOR_PIN_1 = D5;   // GPIO14
+const int MOTOR_PIN_2 = D6;   // GPIO12
+const int SWITCH_PIN_OPENING = D2;     // GPIO4 (LOW when moving/opening)
+const int SWITCH_PIN_OPEN_STOP = D1;   // GPIO5  (LOW when fully opened)
+const int SENSOR_PIN = A0;             // analog light sensor (0-1V on ESP8266 A0)
+const int BUTTON_PIN_OPEN = D7;        // GPIO13 (LOW when pressed)
+const int BUTTON_PIN_CLOSE = D0;       // GPIO16 (LOW when pressed)
 
 // Define Door States
 enum DoorState {
@@ -37,15 +39,102 @@ int averagedLightValue = 0;             // The calculated average light value
 
 const bool USE_LIGHT_SENSOR = true; // Set to false to disable light sensor functionality
 
-// Variables for timed light-based state transitions (single timer)
-unsigned long lightConditionStartTime = 0; // Time when light condition became stable for transition
+// Variables for timed light-based state transitions
 const unsigned long LIGHT_STABLE_TIME_MS = 10000; // Light condition must be stable for 10 seconds
+unsigned long lightOpenTimerStart = 0;
+unsigned long lightCloseTimerStart = 0;
+bool lightOpenTimerActive = false;
+bool lightCloseTimerActive = false;
 
 // Variables for non-blocking Serial printing
 unsigned long lastSerialPrintTime = 0;
 const unsigned long SERIAL_PRINT_INTERVAL_MS = 1000; // Print every 1 second
 
+enum PendingCommand {
+  COMMAND_NONE,
+  COMMAND_OPEN,
+  COMMAND_CLOSE,
+  COMMAND_STOP
+};
+
+volatile PendingCommand pendingCommand = COMMAND_NONE;
+
+void notifyDoorState();
+void setDoorState(DoorState newState);
+void requestMotorOpen();
+void requestMotorClose();
+void requestMotorStop();
+
+const char* currentDoorStateLabel() {
+  switch (currentDoorState) {
+    case DOOR_CLOSED: return "closed";
+    case DOOR_OPEN: return "open";
+    case OPENING_DOOR: return "opening";
+    case CLOSING_DOOR: return "closing";
+    case ERROR_TIMEOUT: return "error";
+    case DOOR_UNKNOWN:
+    default: return "unknown";
+  }
+}
+
+void notifyDoorState() {
+  homeAssistantPublishState();
+}
+
+void setDoorState(DoorState newState) {
+  currentDoorState = newState;
+  notifyDoorState();
+}
+
+// Motor helpers (non-blocking), ensure consistent state updates
+void motorOpen() {
+  digitalWrite(MOTOR_PIN_1, HIGH);
+  digitalWrite(MOTOR_PIN_2, LOW);
+  setDoorState(OPENING_DOOR);
+  motorStartTime = millis();
+  lightOpenTimerActive = false;
+}
+
+void motorClose() {
+  digitalWrite(MOTOR_PIN_1, LOW);
+  digitalWrite(MOTOR_PIN_2, HIGH);
+  setDoorState(CLOSING_DOOR);
+  motorStartTime = millis();
+  lightCloseTimerActive = false;
+}
+
+void motorStop() {
+  digitalWrite(MOTOR_PIN_1, LOW);
+  digitalWrite(MOTOR_PIN_2, LOW);
+  notifyDoorState();
+  motorStartTime = 0;
+  lightOpenTimerActive = false;
+  lightCloseTimerActive = false;
+}
+
+void requestMotorOpen() {
+  pendingCommand = COMMAND_OPEN;
+}
+
+void requestMotorClose() {
+  pendingCommand = COMMAND_CLOSE;
+}
+
+void requestMotorStop() {
+  pendingCommand = COMMAND_STOP;
+}
+
 void setup() {
+  // --- Common pin setup ---
+  pinMode(MOTOR_PIN_1, OUTPUT);
+  pinMode(MOTOR_PIN_2, OUTPUT);
+  pinMode(SWITCH_PIN_OPENING, INPUT_PULLUP);
+  pinMode(SWITCH_PIN_OPEN_STOP, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_OPEN, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_CLOSE, INPUT_PULLUP);
+  Serial.begin(115200);
+  delay(50);
+  homeAssistantMqttSetup(currentDoorStateLabel, requestMotorOpen, requestMotorClose, requestMotorStop);
     // Set pin modes
     pinMode(MOTOR_PIN_1, OUTPUT);
     pinMode(MOTOR_PIN_2, OUTPUT);
@@ -67,27 +156,18 @@ void setup() {
     // Determine initial door state based on end switches
     // This is crucial for proper startup
     if (digitalRead(SWITCH_PIN_OPENING) == LOW) {
-        currentDoorState = DOOR_CLOSED;
+        setDoorState(DOOR_CLOSED);
         Serial.println("Initial State: DOOR_CLOSED");
     } else if (digitalRead(SWITCH_PIN_OPEN_STOP) == LOW) {
-        currentDoorState = DOOR_OPEN;
+        setDoorState(DOOR_OPEN);
         Serial.println("Initial State: DOOR_OPEN");
     } else {
         // If neither switch is active, the door is in an unknown position.
         // It's safer to attempt to close it to a known state (closed) to be safe for night.
-        currentDoorState = CLOSING_DOOR;
-        digitalWrite(MOTOR_PIN_1, LOW);
-        digitalWrite(MOTOR_PIN_2, HIGH); // Start closing motor
-        motorStartTime = millis();
+        motorClose();
         Serial.println("Initial State: DOOR_UNKNOWN. Attempting to CLOSE to a known state.");
     }
     motorStop(); // Ensure motor is off initially until needed
-}
-
-// Function to stop the motor
-void motorStop() {
-    digitalWrite(MOTOR_PIN_1, LOW);
-    digitalWrite(MOTOR_PIN_2, LOW);
 }
 
 // Function to read and average the light sensor value
@@ -109,6 +189,7 @@ bool readStableSwitch(int pin, unsigned long debounceTime = 300) {
     unsigned long start = millis();
     while (millis() - start < debounceTime) {
       if (digitalRead(pin) == LOW) return false; // bounced back
+      yield(); // keep WiFi stack responsive during debounce window
     }
     return true; // stable high
   }
@@ -117,6 +198,32 @@ bool readStableSwitch(int pin, unsigned long debounceTime = 300) {
 
 
 void loop() {
+  // keep MQTT alive
+  homeAssistantMqttLoop();
+
+  if (pendingCommand != COMMAND_NONE) {
+    PendingCommand cmd = pendingCommand;
+    pendingCommand = COMMAND_NONE;
+    switch (cmd) {
+      case COMMAND_OPEN:
+        Serial.println("Executing command: OPEN");
+        motorOpen();
+        break;
+      case COMMAND_CLOSE:
+        Serial.println("Executing command: CLOSE");
+        motorClose();
+        break;
+      case COMMAND_STOP:
+        Serial.println("Executing command: STOP");
+        motorStop();
+        setDoorState(DOOR_UNKNOWN);
+        break;
+      case COMMAND_NONE:
+      default:
+        break;
+    }
+  }
+
     // Always read and average the light sensor value
     readLightSensor();
 
@@ -140,94 +247,88 @@ void loop() {
     // State Machine Logic
     switch (currentDoorState) {
         case DOOR_UNKNOWN:
+            if (isDoorFullyClosed) {
+                motorStop();
+                setDoorState(DOOR_CLOSED);
+                Serial.println("Transition: DOOR_UNKNOWN -> DOOR_CLOSED (Switch Indicates Closed)");
+                break;
+            }
+            if (isDoorFullyOpened) {
+                motorStop();
+                setDoorState(DOOR_OPEN);
+                Serial.println("Transition: DOOR_UNKNOWN -> DOOR_OPEN (Switch Indicates Open)");
+                break;
+            }
             // This state should primarily be handled in setup.
             // If we land here and motor is not running, transition to ERROR_TIMEOUT
-            if (millis() - motorStartTime >= MOTOR_TIMEOUT_MS && motorStartTime != 0) {
+            if (motorStartTime != 0 && millis() - motorStartTime >= MOTOR_TIMEOUT_MS) {
                  motorStop();
-                 currentDoorState = ERROR_TIMEOUT;
+                 setDoorState(ERROR_TIMEOUT);
                  Serial.println("ERROR: DOOR_UNKNOWN Timeout during startup!");
             }
             // Allow manual override from unknown state
             if (buttonOpenState == LOW) {
-                currentDoorState = OPENING_DOOR;
-                digitalWrite(MOTOR_PIN_1, HIGH);
-                digitalWrite(MOTOR_PIN_2, LOW);
-                motorStartTime = millis();
+                motorOpen();
                 Serial.println("Transition: DOOR_UNKNOWN -> OPENING_DOOR (Manual Override)");
             } else if (buttonCloseState == LOW) {
-                currentDoorState = CLOSING_DOOR;
-                digitalWrite(MOTOR_PIN_1, LOW);
-                digitalWrite(MOTOR_PIN_2, HIGH);
-                motorStartTime = millis();
+                motorClose();
                 Serial.println("Transition: DOOR_UNKNOWN -> CLOSING_DOOR (Manual Override)");
             }
             break;
 
         case DOOR_CLOSED:
-            motorStop(); // Ensure motor is off when door is closed
             // Manual override takes precedence
             if (buttonOpenState == LOW) {
-                currentDoorState = OPENING_DOOR;
-                digitalWrite(MOTOR_PIN_1, HIGH); // Motor direction for opening
-                digitalWrite(MOTOR_PIN_2, LOW);
-                motorStartTime = millis();
+                motorOpen();
                 Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Manual Override)");
             }
             // Automatic open based on light sensor
             else if (USE_LIGHT_SENSOR) {
+                unsigned long now = millis();
                 if (averagedLightValue > LIGHT_THRESHOLD_OPEN) {
-                    if (lightConditionStartTime == 0) {
-                        lightConditionStartTime = millis(); // Start timer if condition just met
+                    if (!lightOpenTimerActive) {
+                        lightOpenTimerActive = true;
+                        lightOpenTimerStart = now;
                         Serial.println("Light condition met for opening. Starting 10s timer...");
-                    } else if (millis() - lightConditionStartTime >= LIGHT_STABLE_TIME_MS) {
-                        currentDoorState = OPENING_DOOR;
-                        digitalWrite(MOTOR_PIN_1, HIGH); // Motor direction for opening
-                        digitalWrite(MOTOR_PIN_2, LOW);
-                        motorStartTime = millis();
+                    } else if (now - lightOpenTimerStart >= LIGHT_STABLE_TIME_MS) {
+                        motorOpen();
                         Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Light > Threshold for 10s)");
-                        lightConditionStartTime = 0; // Reset timer after transition
+                        lightOpenTimerActive = false;
                     }
-                } else {
-                    lightConditionStartTime = 0; // Reset timer if light drops below threshold
+                } else if (lightOpenTimerActive) {
+                    lightOpenTimerActive = false;
+                    Serial.println("Light condition for opening canceled.");
                 }
-            }
-            // Reset light timer if light sensor is not enabled or door is not fully closed
-            else {
-                lightConditionStartTime = 0;
+            } else {
+                lightOpenTimerActive = false;
             }
             break;
 
         case DOOR_OPEN:
-            motorStop(); // Ensure motor is off when door is open
             // Manual override takes precedence
             if (buttonCloseState == LOW) {
-                currentDoorState = CLOSING_DOOR;
-                digitalWrite(MOTOR_PIN_1, LOW);  // Motor direction for closing
-                digitalWrite(MOTOR_PIN_2, HIGH);
-                motorStartTime = millis();
+                motorClose();
                 Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Manual Override)");
             }
             // Automatic close based on light sensor (with 10-second delay)
-            else if (USE_LIGHT_SENSOR) {  // && isDoorFullyOpened) {
+            else if (USE_LIGHT_SENSOR) {
+                unsigned long now = millis();
                 if (averagedLightValue < LIGHT_THRESHOLD_CLOSE) {
-                    if (lightConditionStartTime == 0) {
-                        lightConditionStartTime = millis(); // Start timer if condition just met
+                    if (!lightCloseTimerActive) {
+                        lightCloseTimerActive = true;
+                        lightCloseTimerStart = now;
                         Serial.println("Light condition met for closing. Starting 10s timer...");
-                    } else if (millis() - lightConditionStartTime >= LIGHT_STABLE_TIME_MS) {
-                        currentDoorState = CLOSING_DOOR;
-                        digitalWrite(MOTOR_PIN_1, LOW);  // Motor direction for closing
-                        digitalWrite(MOTOR_PIN_2, HIGH);
-                        motorStartTime = millis();
+                    } else if (now - lightCloseTimerStart >= LIGHT_STABLE_TIME_MS) {
+                        motorClose();
                         Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Light < Threshold for 10s)");
-                        lightConditionStartTime = 0; // Reset timer after transition
+                        lightCloseTimerActive = false;
                     }
-                } else {
-                    lightConditionStartTime = 0; // Reset timer if light rises above threshold
+                } else if (lightCloseTimerActive) {
+                    lightCloseTimerActive = false;
+                    Serial.println("Light condition for closing canceled.");
                 }
-            }
-            // Reset light timer if light sensor is not enabled or door is not fully open
-            else {
-                lightConditionStartTime = 0;
+            } else {
+                lightCloseTimerActive = false;
             }
             break;
 
@@ -235,10 +336,7 @@ void loop() {
             // Manual override: pressing CLOSE button during opening
             if (buttonCloseState == LOW) {
                 motorStop(); // Stop current motion
-                currentDoorState = CLOSING_DOOR;
-                digitalWrite(MOTOR_PIN_1, LOW); // Reverse direction
-                digitalWrite(MOTOR_PIN_2, HIGH);
-                motorStartTime = millis();
+                motorClose();
                 Serial.println("Transition: OPENING_DOOR -> CLOSING_DOOR (Manual Override)");
                 break; // Exit switch case to allow new state logic to run next loop
             }
@@ -246,13 +344,13 @@ void loop() {
             // Check if the door reached the open limit switch
             if (isDoorFullyOpened) { // Switch activated (pulled to LOW)
                 motorStop();
-                currentDoorState = DOOR_OPEN;
+                setDoorState(DOOR_OPEN);
                 Serial.println("Transition: OPENING_DOOR -> DOOR_OPEN (Switch Hit)");
             }
             // Check for motor timeout
             else if (millis() - motorStartTime >= MOTOR_TIMEOUT_MS) {
                 motorStop();
-                currentDoorState = ERROR_TIMEOUT;
+                setDoorState(ERROR_TIMEOUT);
                 Serial.println("ERROR: OPENING_DOOR Timeout!");
             }
             break;
@@ -261,10 +359,7 @@ void loop() {
             // Manual override: pressing OPEN button during closing
             if (buttonOpenState == LOW) {
                 motorStop(); // Stop current motion
-                currentDoorState = OPENING_DOOR;
-                digitalWrite(MOTOR_PIN_1, HIGH); // Reverse direction
-                digitalWrite(MOTOR_PIN_2, LOW);
-                motorStartTime = millis();
+                motorOpen();
                 Serial.println("Transition: CLOSING_DOOR -> OPENING_DOOR (Manual Override)");
                 break; // Exit switch case to allow new state logic to run next loop
             }
@@ -273,13 +368,13 @@ void loop() {
             // motor must run at least 2s before we check if doors are closed
             if (millis() - motorStartTime >= 2000 && isDoorFullyClosed) { // Switch activated (pulled to LOW)
                 motorStop();
-                currentDoorState = DOOR_CLOSED;
+                setDoorState(DOOR_CLOSED);
                 Serial.println("Transition: CLOSING_DOOR -> DOOR_CLOSED (Switch Hit)");
             }
             // Check for motor timeout
             else if (millis() - motorStartTime >= MOTOR_TIMEOUT_MS) {
                 motorStop();
-                currentDoorState = ERROR_TIMEOUT;
+                setDoorState(ERROR_TIMEOUT);
                 Serial.println("ERROR: CLOSING_DOOR Timeout!");
             }
             break;
@@ -288,16 +383,10 @@ void loop() {
             motorStop(); // Ensure motor is off
             // Allow manual override to clear error state and attempt movement
             if (buttonOpenState == LOW) {
-                currentDoorState = OPENING_DOOR;
-                digitalWrite(MOTOR_PIN_1, HIGH);
-                digitalWrite(MOTOR_PIN_2, LOW);
-                motorStartTime = millis();
+                motorOpen();
                 Serial.println("Transition: ERROR_TIMEOUT -> OPENING_DOOR (Manual Override)");
             } else if (buttonCloseState == LOW) {
-                currentDoorState = CLOSING_DOOR;
-                digitalWrite(MOTOR_PIN_1, LOW);
-                digitalWrite(MOTOR_PIN_2, HIGH);
-                motorStartTime = millis();
+                motorClose();
                 Serial.println("Transition: ERROR_TIMEOUT -> CLOSING_DOOR (Manual Override)");
             }
             // Otherwise, stay in error state and log
