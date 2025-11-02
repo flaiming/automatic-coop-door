@@ -1,15 +1,19 @@
 #include "home_assistant_mqtt.h"
 
-// ===== Platform-specific pin mapping =====
-// Wemos D1 mini GPIO map:
-// D5=GPIO14, D6=GPIO12, D7=GPIO13, D1=GPIO5, D2=GPIO4, D0=GPIO16, A0=ADC
-const int MOTOR_PIN_1 = D5;   // GPIO14
-const int MOTOR_PIN_2 = D6;   // GPIO12
-const int SWITCH_PIN_OPENING = D2;     // GPIO4 (LOW when moving/opening)
-const int SWITCH_PIN_OPEN_STOP = D1;   // GPIO5  (LOW when fully opened)
-const int SENSOR_PIN = A0;             // analog light sensor (0-1V on ESP8266 A0)
-const int BUTTON_PIN_OPEN = D7;        // GPIO13 (LOW when pressed)
-const int BUTTON_PIN_CLOSE = D0;       // GPIO16 (LOW when pressed)
+// ===== ESP32-only configuration =====
+#ifndef ARDUINO_ARCH_ESP32
+#error "This project now targets ESP32 boards only."
+#endif
+
+// Default mapping for ESP32 DevKit v1 (adjust to suit your wiring).
+const int MOTOR_PIN_1 = 18;
+const int MOTOR_PIN_2 = 19;
+const int SWITCH_PIN_OPENING = 23;   // LOW when moving/opening
+const int SWITCH_PIN_OPEN_STOP = 22; // LOW when fully opened
+const int SENSOR_PIN = 34;           // ADC1 channel (input only)
+const int BUTTON_PIN_OPEN = 32;      // LOW when pressed
+const int BUTTON_PIN_CLOSE = 33;     // LOW when pressed
+
 
 // Define Door States
 enum DoorState {
@@ -132,42 +136,34 @@ void setup() {
   pinMode(SWITCH_PIN_OPEN_STOP, INPUT_PULLUP);
   pinMode(BUTTON_PIN_OPEN, INPUT_PULLUP);
   pinMode(BUTTON_PIN_CLOSE, INPUT_PULLUP);
+  analogReadResolution(10);         // Match ESP8266 10-bit ADC scale for existing thresholds
+  analogSetAttenuation(ADC_11db);   // Allow ~0-3.3V input on ADC1 pins
+
   Serial.begin(115200);
   delay(50);
+  Serial.println("Chicken Coop Door Opener - Starting up...");
+
   homeAssistantMqttSetup(currentDoorStateLabel, requestMotorOpen, requestMotorClose, requestMotorStop);
-    // Set pin modes
-    pinMode(MOTOR_PIN_1, OUTPUT);
-    pinMode(MOTOR_PIN_2, OUTPUT);
-    // Use INPUT_PULLUP for end switches and buttons, assuming they connect to GND when activated
-    pinMode(SWITCH_PIN_OPENING, INPUT_PULLUP);
-    pinMode(SWITCH_PIN_OPEN_STOP, INPUT_PULLUP);
-    pinMode(BUTTON_PIN_OPEN, INPUT_PULLUP);  // Manual Open button
-    pinMode(BUTTON_PIN_CLOSE, INPUT_PULLUP); // Manual Close button
 
-    // Initialize Serial communication
-    Serial.begin(115200);
-    Serial.println("Chicken Coop Door Opener - Starting up...");
+  // Initialize light sensor readings array
+  for (int i = 0; i < LIGHT_READING_COUNT; i++) {
+    lightReadings[i] = 0;
+  }
 
-    // Initialize light sensor readings array
-    for (int i = 0; i < LIGHT_READING_COUNT; i++) {
-        lightReadings[i] = 0;
-    }
-
-    // Determine initial door state based on end switches
-    // This is crucial for proper startup
-    if (digitalRead(SWITCH_PIN_OPENING) == LOW) {
-        setDoorState(DOOR_CLOSED);
-        Serial.println("Initial State: DOOR_CLOSED");
-    } else if (digitalRead(SWITCH_PIN_OPEN_STOP) == LOW) {
-        setDoorState(DOOR_OPEN);
-        Serial.println("Initial State: DOOR_OPEN");
-    } else {
-        // If neither switch is active, the door is in an unknown position.
-        // It's safer to attempt to close it to a known state (closed) to be safe for night.
-        motorClose();
-        Serial.println("Initial State: DOOR_UNKNOWN. Attempting to CLOSE to a known state.");
-    }
-    motorStop(); // Ensure motor is off initially until needed
+  // Determine initial door state based on end switches
+  if (digitalRead(SWITCH_PIN_OPENING) == LOW) {
+    setDoorState(DOOR_CLOSED);
+    Serial.println("Initial State: DOOR_CLOSED");
+  } else if (digitalRead(SWITCH_PIN_OPEN_STOP) == LOW) {
+    setDoorState(DOOR_OPEN);
+    Serial.println("Initial State: DOOR_OPEN");
+  } else {
+    // If neither switch is active, the door is in an unknown position.
+    // It's safer to attempt to close it to a known state (closed) to be safe for night.
+    motorClose();
+    Serial.println("Initial State: DOOR_UNKNOWN. Attempting to CLOSE to a known state.");
+  }
+  motorStop(); // Ensure motor is off initially until needed
 }
 
 // Function to read and average the light sensor value

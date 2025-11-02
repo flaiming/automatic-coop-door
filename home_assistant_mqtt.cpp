@@ -1,6 +1,10 @@
 #include "home_assistant_mqtt.h"
 
-#include <ESP8266WiFi.h>
+#ifndef ARDUINO_ARCH_ESP32
+#error "This project now targets ESP32 boards only."
+#endif
+
+#include <WiFi.h>
 #include <PubSubClient.h>
 
 #include "wifi_secrets.h"
