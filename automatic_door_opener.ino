@@ -1,4 +1,5 @@
 #include "home_assistant_mqtt.h"
+#include "status_display.h"
 
 // ===== ESP32-only configuration =====
 #ifndef ARDUINO_ARCH_ESP32
@@ -9,7 +10,7 @@
 const int MOTOR_PIN_1 = 18;
 const int MOTOR_PIN_2 = 19;
 const int SWITCH_PIN_OPENING = 23;   // LOW when moving/opening
-const int SWITCH_PIN_OPEN_STOP = 22; // LOW when fully opened
+const int SWITCH_PIN_OPEN_STOP = 25; // LOW when fully opened (moved off I2C SCL pin)
 const int SENSOR_PIN = 34;           // ADC1 channel (input only)
 const int BUTTON_PIN_OPEN = 32;      // LOW when pressed
 const int BUTTON_PIN_CLOSE = 33;     // LOW when pressed
@@ -50,6 +51,7 @@ unsigned long lightCloseTimerStart = 0;
 bool lightOpenTimerActive = false;
 bool lightCloseTimerActive = false;
 
+
 // Variables for non-blocking Serial printing
 unsigned long lastSerialPrintTime = 0;
 const unsigned long SERIAL_PRINT_INTERVAL_MS = 1000; // Print every 1 second
@@ -88,6 +90,7 @@ void notifyDoorState() {
 void setDoorState(DoorState newState) {
   currentDoorState = newState;
   notifyDoorState();
+  statusDisplaySetDoorState(currentDoorStateLabel());
 }
 
 // Motor helpers (non-blocking), ensure consistent state updates
@@ -144,25 +147,18 @@ void setup() {
   Serial.println("Chicken Coop Door Opener - Starting up...");
 
   homeAssistantMqttSetup(currentDoorStateLabel, requestMotorOpen, requestMotorClose, requestMotorStop);
+  statusDisplaySetup();
+  statusDisplaySetDoorState(currentDoorStateLabel());
+  statusDisplaySetLightLevel(averagedLightValue);
 
   // Initialize light sensor readings array
   for (int i = 0; i < LIGHT_READING_COUNT; i++) {
     lightReadings[i] = 0;
   }
 
-  // Determine initial door state based on end switches
-  if (digitalRead(SWITCH_PIN_OPENING) == LOW) {
-    setDoorState(DOOR_CLOSED);
-    Serial.println("Initial State: DOOR_CLOSED");
-  } else if (digitalRead(SWITCH_PIN_OPEN_STOP) == LOW) {
-    setDoorState(DOOR_OPEN);
-    Serial.println("Initial State: DOOR_OPEN");
-  } else {
-    // If neither switch is active, the door is in an unknown position.
-    // It's safer to attempt to close it to a known state (closed) to be safe for night.
-    motorClose();
-    Serial.println("Initial State: DOOR_UNKNOWN. Attempting to CLOSE to a known state.");
-  }
+  // Report unknown until the loop determines real position
+  setDoorState(DOOR_UNKNOWN);
+  Serial.println("Initial State: DOOR_UNKNOWN");
   motorStop(); // Ensure motor is off initially until needed
 }
 
@@ -178,6 +174,7 @@ void readLightSensor() {
     lightReadIndex = (lightReadIndex + 1) % LIGHT_READING_COUNT;
     // Calculate the average
     averagedLightValue = lightReadingsTotal / LIGHT_READING_COUNT;
+    statusDisplaySetLightLevel(averagedLightValue);
 }
 
 bool readStableSwitch(int pin, unsigned long debounceTime = 300) {
@@ -196,6 +193,7 @@ bool readStableSwitch(int pin, unsigned long debounceTime = 300) {
 void loop() {
   // keep MQTT alive
   homeAssistantMqttLoop();
+  statusDisplayLoop();
 
   if (pendingCommand != COMMAND_NONE) {
     PendingCommand cmd = pendingCommand;
