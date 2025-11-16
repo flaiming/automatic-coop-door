@@ -14,3 +14,9 @@ void homeAssistantMqttLoop();
 
 // Immediately publishes the current door state to MQTT, if connected.
 void homeAssistantPublishState();
+
+// Returns true when the ESP32 is associated with the configured Wi-Fi network.
+bool homeAssistantWifiConnected();
+
+// Returns true when the MQTT client is connected to the broker.
+bool homeAssistantMqttConnected();

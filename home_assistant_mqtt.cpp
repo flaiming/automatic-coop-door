@@ -209,3 +209,11 @@ void homeAssistantMqttLoop() {
 void homeAssistantPublishState() {
   publishStateImpl();
 }
+
+bool homeAssistantWifiConnected() {
+  return WiFi.status() == WL_CONNECTED;
+}
+
+bool homeAssistantMqttConnected() {
+  return client.connected();
+}

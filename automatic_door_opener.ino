@@ -33,7 +33,7 @@ const unsigned long MOTOR_TIMEOUT_MS = 25000; // Max time motor is allowed to ru
 
 // Light Sensor Hysteresis and Averaging
 const int LIGHT_THRESHOLD_OPEN = 600; // If averaged light value goes ABOVE this, initiate opening
-const int LIGHT_THRESHOLD_CLOSE = 200; // If averaged light value goes BELOW this, initiate closing
+const int LIGHT_THRESHOLD_CLOSE = 120; // If averaged light value goes BELOW this, initiate closing
                                        // (LIGHT_THRESHOLD_CLOSE must be less than LIGHT_THRESHOLD_OPEN)
 
 const int LIGHT_READING_COUNT = 10;    // Number of readings for averaging
@@ -195,6 +195,20 @@ void loop() {
   homeAssistantMqttLoop();
   statusDisplayLoop();
 
+  bool wifiOnline = homeAssistantWifiConnected();
+  static bool lastWifiOnline = true;
+  if (wifiOnline != lastWifiOnline) {
+    lastWifiOnline = wifiOnline;
+    Serial.println(wifiOnline
+                       ? "WiFi restored – returning control to Home Assistant"
+                       : "WiFi offline – enabling light-based fallback control");
+  }
+  bool allowLightAutomation = USE_LIGHT_SENSOR && !wifiOnline;
+  if (!allowLightAutomation) {
+    lightOpenTimerActive = false;
+    lightCloseTimerActive = false;
+  }
+
   if (pendingCommand != COMMAND_NONE) {
     PendingCommand cmd = pendingCommand;
     pendingCommand = COMMAND_NONE;
@@ -277,7 +291,7 @@ void loop() {
                 Serial.println("Transition: DOOR_CLOSED -> OPENING_DOOR (Manual Override)");
             }
             // Automatic open based on light sensor
-            else if (USE_LIGHT_SENSOR) {
+            else if (allowLightAutomation) {
                 unsigned long now = millis();
                 if (averagedLightValue > LIGHT_THRESHOLD_OPEN) {
                     if (!lightOpenTimerActive) {
@@ -305,7 +319,7 @@ void loop() {
                 Serial.println("Transition: DOOR_OPEN -> CLOSING_DOOR (Manual Override)");
             }
             // Automatic close based on light sensor (with 10-second delay)
-            else if (USE_LIGHT_SENSOR) {
+            else if (allowLightAutomation) {
                 unsigned long now = millis();
                 if (averagedLightValue < LIGHT_THRESHOLD_CLOSE) {
                     if (!lightCloseTimerActive) {
