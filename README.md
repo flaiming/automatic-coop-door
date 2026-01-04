@@ -1,4 +1,4 @@
-# AUtomatic coop door
+# Automatic coop door
 
 Compact solution for automatic chicken coop door. 
 
