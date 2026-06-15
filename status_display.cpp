@@ -4,6 +4,8 @@
 #error "This project now targets ESP32 boards only."
 #endif
 
+#if STATUS_DISPLAY_ENABLED
+
 #include <Wire.h>
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
@@ -107,3 +109,13 @@ void statusDisplayLoop() {
     drawDisplay();
   }
 }
+
+#else  // STATUS_DISPLAY_ENABLED
+
+// Provide no-op stubs when the OLED display is not connected or explicitly disabled.
+void statusDisplaySetup() {}
+void statusDisplaySetDoorState(const char*) {}
+void statusDisplaySetLightLevel(int) {}
+void statusDisplayLoop() {}
+
+#endif  // STATUS_DISPLAY_ENABLED

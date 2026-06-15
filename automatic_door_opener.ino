@@ -32,8 +32,8 @@ unsigned long motorStartTime = 0;       // Stores the millis() value when motor 
 const unsigned long MOTOR_TIMEOUT_MS = 25000; // Max time motor is allowed to run (25 seconds)
 
 // Light Sensor Hysteresis and Averaging
-const int LIGHT_THRESHOLD_OPEN = 600; // If averaged light value goes ABOVE this, initiate opening
-const int LIGHT_THRESHOLD_CLOSE = 120; // If averaged light value goes BELOW this, initiate closing
+const int LIGHT_THRESHOLD_OPEN = 550; // If averaged light value goes ABOVE this, initiate opening
+const int LIGHT_THRESHOLD_CLOSE = 80; // If averaged light value goes BELOW this, initiate closing
                                        // (LIGHT_THRESHOLD_CLOSE must be less than LIGHT_THRESHOLD_OPEN)
 
 const int LIGHT_READING_COUNT = 10;    // Number of readings for averaging
@@ -175,6 +175,7 @@ void readLightSensor() {
     // Calculate the average
     averagedLightValue = lightReadingsTotal / LIGHT_READING_COUNT;
     statusDisplaySetLightLevel(averagedLightValue);
+    homeAssistantPublishLightLevel(averagedLightValue);
 }
 
 bool readStableSwitch(int pin, unsigned long debounceTime = 300) {

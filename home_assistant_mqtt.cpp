@@ -45,12 +45,14 @@ const char* mqtt_pass = "";
 #endif
 
 const char* device_name = "Chicken Coop Door";
-const char* unique_id = "chicken_coop_door_esp8266";
+const char* unique_id = "chicken_coop_door";
 const char* mqtt_base = "homeassistant/cover/chicken_coop_door";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 unsigned long lastMqttState = 0;
+int lastLightLevel = 0;
+bool lightLevelKnown = false;
 
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 5000;
 constexpr unsigned long WIFI_STATUS_PRINT_INTERVAL_MS = 10000;
@@ -60,6 +62,8 @@ bool wifiAttemptInProgress = false;
 
 constexpr unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 unsigned long lastMqttAttempt = 0;
+constexpr unsigned long LIGHT_PUBLISH_MIN_INTERVAL_MS = 10000; // throttle light publishes to >=10s
+unsigned long lastLightPublish = 0;
 
 const char* (*stateLabelProvider)() = nullptr;
 void (*commandOpenFn)() = nullptr;
@@ -68,6 +72,7 @@ void (*commandStopFn)() = nullptr;
 
 void publishDiscovery();
 void publishStateImpl();
+void publishLightStateImpl();
 
 String topicWithSuffix(const char* suffix) {
   return String(mqtt_base) + suffix;
@@ -121,7 +126,8 @@ void publishDiscovery() {
     "\"state_closed\":\"closed\"," +
     "\"avail_t\":\"" + topicWithSuffix("/availability") + "\"," +
     "\"pl_avail\":\"online\"," +
-    "\"pl_not_avail\":\"offline\"" +
+    "\"pl_not_avail\":\"offline\"," +
+    "\"json_attr_t\":\"" + topicWithSuffix("/attributes") + "\"" +
   "}";
 
   client.publish(discoveryTopic.c_str(), payload.c_str(), true);
@@ -154,6 +160,14 @@ void publishStateImpl() {
   client.publish(stateTopic.c_str(), stateLabelProvider(), true);
 }
 
+void publishLightStateImpl() {
+  if (!client.connected() || !lightLevelKnown) return;
+  String attributesTopic = topicWithSuffix("/attributes");
+  String payload = String("{\"light_level\":") + String(lastLightLevel) + "}";
+  client.publish(attributesTopic.c_str(), payload.c_str(), true);
+  lastLightPublish = millis();
+}
+
 }  // namespace
 
 void homeAssistantMqttSetup(const char* (*stateLabelFn)(),
@@ -172,6 +186,7 @@ void homeAssistantMqttSetup(const char* (*stateLabelFn)(),
   lastWifiStatusPrint = 0;
   lastMqttAttempt = 0;
   ensureWifi();
+  client.setBufferSize(2048);
 }
 
 void homeAssistantMqttLoop() {
@@ -190,6 +205,7 @@ void homeAssistantMqttLoop() {
           client.subscribe(topicWithSuffix("/set").c_str());
           publishDiscovery();
           publishStateImpl();
+          publishLightStateImpl();
         } else {
           Serial.print(" failed, rc=");
           Serial.println(client.state());
@@ -203,11 +219,22 @@ void homeAssistantMqttLoop() {
   if (millis() - lastMqttState > 30000) {
     lastMqttState = millis();
     publishStateImpl();
+    publishLightStateImpl();
   }
 }
 
 void homeAssistantPublishState() {
   publishStateImpl();
+}
+
+void homeAssistantPublishLightLevel(int lightLevel) {
+  bool changed = !lightLevelKnown || lightLevel != lastLightLevel;
+  lastLightLevel = lightLevel;
+  lightLevelKnown = true;
+  unsigned long now = millis();
+  if (changed && (lastLightPublish == 0 || now - lastLightPublish >= LIGHT_PUBLISH_MIN_INTERVAL_MS)) {
+    publishLightStateImpl();
+  }
 }
 
 bool homeAssistantWifiConnected() {
